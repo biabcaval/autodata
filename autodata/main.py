@@ -13,8 +13,11 @@ Uso:
     ou via Docker/Cloud Run Jobs
 """
 
-from process_audio import main
+from organize import organize
+import asyncio
+from run_audio_val import run_pipeline
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(organize())
+    run_pipeline()

@@ -17,6 +17,7 @@ import hashlib
 import asyncio
 from datetime import datetime
 
+import pandas as pd
 import aiohttp
 from gcloud.aio.storage import Storage
 
@@ -27,8 +28,9 @@ from config import BUCKET_ORIGEM, BUCKET_DESTINO, FORMATOS_ACEITOS
 # FUNÇÕES DE VALIDAÇÃO E NORMALIZAÇÃO (síncronas, CPU-bound)
 # ============================================================================
 
+"""Valida se o nome do arquivo está em snake_case sem caracteres especiais."""
+
 def validar_nome_arquivo(nome_arquivo):
-    """Valida se o nome do arquivo está em snake_case sem caracteres especiais."""
     nome_base = os.path.splitext(os.path.basename(nome_arquivo))[0]
     
     pattern = r'^[a-z0-9]+(_[a-z0-9]+)*$'
@@ -52,9 +54,8 @@ def validar_nome_arquivo(nome_arquivo):
     
     return len(erros) == 0, erros
 
-
+"""Normaliza nome do arquivo para snake_case."""
 def normalizar_nome(nome_arquivo):
-    """Normaliza nome do arquivo para snake_case."""
     nome_base = os.path.splitext(os.path.basename(nome_arquivo))[0]
     extensao = os.path.splitext(nome_arquivo)[1].lower()
     
@@ -78,9 +79,9 @@ def normalizar_nome(nome_arquivo):
     
     return f"{nome_base}{extensao}"
 
-
+"""Calcula o hash SHA256 do conteúdo em memória."""
 def calcular_hash(conteudo: bytes) -> str:
-    """Calcula o hash SHA256 do conteúdo em memória."""
+    
     return hashlib.sha256(conteudo).hexdigest()
 
 
@@ -88,20 +89,15 @@ def calcular_hash(conteudo: bytes) -> str:
 # FUNÇÕES ASYNC (I/O-bound)
 # ============================================================================
 
-async def listar_arquivos_async(storage: Storage, bucket_name: str) -> list[str]:
-    """Lista todos os arquivos de áudio no bucket de forma async."""
-    arquivos = []
+"""Lista todos os arquivos de áudio no bucket de forma async."""
+def listar_arquivos_async(manifest) -> list[str]:
     
-    blobs = await storage.list_objects(bucket_name)
-    
-    for item in blobs.get('items', []):
-        nome = item['name']
-        if any(nome.lower().endswith(ext) for ext in FORMATOS_ACEITOS):
-            arquivos.append(nome)
+    df = pd.read_csv("paths_metadata.csv")
+    arquivos = [i for i in df['path']]
     
     return arquivos
 
-
+"""Aplica as checagens e/ou processamentos necessarios a um arquivo"""
 async def processar_arquivo_async(
     storage: Storage,
     nome_arquivo: str,
@@ -185,9 +181,9 @@ async def processar_arquivo_async(
             resultado["erros"].append(str(e))
             return resultado
 
-
+"""Gera o arquivo manifest.csv com todos os arquivos processados."""
 async def gerar_manifest_async(storage: Storage, resultados: list[dict]):
-    """Gera o arquivo manifest.csv com todos os arquivos processados."""
+    
     linhas = ["arquivo_original,arquivo_saida,status,hash_sha256"]
     
     for r in resultados:
@@ -211,12 +207,8 @@ async def gerar_manifest_async(storage: Storage, resultados: list[dict]):
 # FUNÇÃO PRINCIPAL
 # ============================================================================
 
-async def run_pipeline():
+async def organize():
     """Executa a pipeline async de processamento."""
-    
-    print("\n" + "═"*60)
-    print("🎵 AUTODATA - Organização de Arquivos de Áudio (Async)")
-    print("═"*60)
     
     # Info do Cloud Run Job
     task_index = int(os.environ.get('CLOUD_RUN_TASK_INDEX', 
@@ -298,10 +290,3 @@ async def run_pipeline():
         print("═"*60 + "\n")
 
 
-def main():
-    """Ponto de entrada - executa o event loop async."""
-    asyncio.run(run_pipeline())
-
-
-if __name__ == "__main__":
-    main()

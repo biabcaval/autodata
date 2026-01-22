@@ -1,2 +1,4 @@
 gcloud-aio-storage>=9.0.0
 aiohttp>=3.9.0
+pandas
+google-cloud-storage
