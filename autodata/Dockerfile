@@ -2,11 +2,25 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy and install dependencies
+# Instalar dependências do sistema para gcloud e audio
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    apt-transport-https \
+    ca-certificates \
+    gnupg \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar e instalar dependências públicas
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install keyrings.google-artifactregistry-auth
-RUN gcloud auth print-access-token | pip install moises-ml-utils --index-url https://oauth2accesstoken:$(gcloud auth print-access-token)@us-central1-python.pkg.dev/moises-ds-data/python/simple/ --extra-index-url https://pypi.org/simple
+
+# Instalar torchcodec (versão nightly)
+RUN pip install --no-cache-dir torchcodec --pre
+
+# Copiar e instalar pacotes privados localmente
+COPY packages/*.whl /tmp/packages/
+RUN pip install --no-cache-dir /tmp/packages/*.whl && rm -rf /tmp/packages
 
 # Copy modules
 COPY config.py .

@@ -81,8 +81,69 @@ def normalizar_nome(nome_arquivo):
 
 """Calcula o hash SHA256 do conteúdo em memória."""
 def calcular_hash(conteudo: bytes) -> str:
-    
     return hashlib.sha256(conteudo).hexdigest()
+
+"""Extrai o blob name de um path GCS (remove prefixo gs://bucket/)."""
+def extrair_blob_name(path: str, bucket_name: str) -> str:
+    prefixo = f'gs://{bucket_name}/'
+    if path.startswith(prefixo):
+        return path[len(prefixo):]
+    return path
+
+"""Extrai o identificador da track/música a partir do path."""
+def extrair_track_id(path: str) -> str:
+    parts = path.split('/')
+    
+    # Verifica se é um stem (pasta pai termina com -stem)
+    for part in parts:
+        if part.endswith('-stem'):
+            song_name = part[:-5]  # Remove sufixo '-stem'
+            return normalizar_nome(song_name).replace('.', '_')
+    
+    # Se não é stem, usa o nome do arquivo sem extensão
+    filename = os.path.splitext(os.path.basename(path))[0]
+    return normalizar_nome(filename).replace('.', '_')
+
+"""Detecta o tipo de dataset baseado no path."""
+def detectar_dataset_type(path: str) -> str:
+    path_lower = path.lower()
+    if '-stem' in path_lower or 'multistem' in path_lower:
+        return 'multistem'
+    elif 'vocal' in path_lower:
+        return 'vocalset'
+    elif 'mir' in path_lower or 'chord' in path_lower:
+        return 'mir'
+    return 'audio'
+
+"""Calcula duração do áudio em segundos a partir do conteúdo."""
+def calcular_duracao(conteudo: bytes, extensao: str) -> float:
+    try:
+        import io
+        from mutagen import File as MutagenFile
+        from mutagen.wave import WAVE
+        from mutagen.mp3 import MP3
+        from mutagen.flac import FLAC
+        from mutagen.mp4 import MP4
+        
+        audio_file = io.BytesIO(conteudo)
+        
+        ext = extensao.lower()
+        if ext == '.wav':
+            audio = WAVE(audio_file)
+        elif ext == '.mp3':
+            audio = MP3(audio_file)
+        elif ext == '.flac':
+            audio = FLAC(audio_file)
+        elif ext in ['.m4a', '.mp4']:
+            audio = MP4(audio_file)
+        else:
+            audio = MutagenFile(audio_file)
+        
+        if audio and audio.info:
+            return round(audio.info.length, 2)
+    except Exception as e:
+        print(f"⚠️  Não foi possível calcular duração: {e}")
+    return 0.0
 
 
 # ============================================================================
@@ -90,9 +151,11 @@ def calcular_hash(conteudo: bytes) -> str:
 # ============================================================================
 
 """Lista todos os arquivos de áudio no bucket de forma async."""
-def listar_arquivos_async(manifest) -> list[str]:
+async def listar_arquivos_async(storage: Storage, bucket_name: str) -> list[str]:
+    csv_path = os.path.join(os.getcwd(), "paths_metadata.csv")
+    print(f"📖 Reading CSV from: {csv_path}")
     
-    df = pd.read_csv("paths_metadata.csv")
+    df = pd.read_csv(csv_path)
     arquivos = [i for i in df['path']]
     
     return arquivos
@@ -121,10 +184,17 @@ async def processar_arquivo_async(
         }
         
         try:
-            print(f"📥 Baixando: {nome_arquivo}")
+            # Extrai blob name (remove gs://bucket/ se presente)
+            blob_name = extrair_blob_name(nome_arquivo, BUCKET_ORIGEM)
+            print(f"📥 Baixando: {blob_name}")
             
             # Download async para memória (não usa /tmp)
-            conteudo = await storage.download(BUCKET_ORIGEM, nome_arquivo)
+            conteudo = await storage.download(BUCKET_ORIGEM, blob_name)
+            
+            # Extrai informações do arquivo
+            extensao = os.path.splitext(nome_arquivo)[1].lower()
+            track_id = extrair_track_id(blob_name)
+            dataset_type = detectar_dataset_type(blob_name)
             
             # Checagem 1: Nomenclatura
             nome_valido, erros_nome = validar_nome_arquivo(nome_arquivo)
@@ -152,6 +222,9 @@ async def processar_arquivo_async(
             # Adiciona hash ao set (thread-safe no asyncio single-thread)
             hashes_processados.add(hash_arquivo)
             
+            # Calcula duração do áudio
+            duracao_seconds = calcular_duracao(conteudo, extensao)
+            
             # Normaliza nome
             nome_normalizado = normalizar_nome(nome_arquivo)
             resultado["nome_normalizado"] = nome_normalizado
@@ -168,10 +241,17 @@ async def processar_arquivo_async(
             resultado["data_processamento"] = datetime.now().isoformat()
             resultado["status"] = "sucesso"
             
-            # Upload metadados
-            nome_meta = nome_normalizado.replace(os.path.splitext(nome_normalizado)[1], '.json')
+            # Informações para o manifest (formato padrão)
+            resultado["track_id"] = track_id
+            resultado["dataset_type"] = dataset_type
+            resultado["duration_seconds"] = duracao_seconds
+            resultado["folder_path"] = nome_saida
+            
+            # Upload metadados na pasta da track: metadata/{track_id}/data.json
+            metadata_path = f"metadata/{track_id}/data.json"
             meta_json = json.dumps(resultado, indent=2, ensure_ascii=False).encode('utf-8')
-            await storage.upload(BUCKET_DESTINO, f"metadata/{nome_meta}", meta_json)
+            await storage.upload(BUCKET_DESTINO, metadata_path, meta_json)
+            print(f"📝 Metadata: {metadata_path}")
             
             return resultado
             
@@ -181,14 +261,19 @@ async def processar_arquivo_async(
             resultado["erros"].append(str(e))
             return resultado
 
-"""Gera o arquivo manifest.csv com todos os arquivos processados."""
+"""Gera o arquivo manifest.csv com todos os arquivos processados (formato padrão)."""
 async def gerar_manifest_async(storage: Storage, resultados: list[dict]):
-    
-    linhas = ["arquivo_original,arquivo_saida,status,hash_sha256"]
+    # Colunas obrigatórias conforme standard.md
+    linhas = ["folder_path,dataset_type,id,duration_seconds"]
     
     for r in resultados:
         if r["status"] == "sucesso":
-            linha = f"{r.get('arquivo_original', '')},{r.get('arquivo_saida', '')},{r['status']},{r.get('hash_sha256', '')}"
+            folder_path = r.get('folder_path', '')
+            dataset_type = r.get('dataset_type', 'audio')
+            track_id = r.get('track_id', '')
+            duration_seconds = r.get('duration_seconds', 0.0)
+            
+            linha = f"{folder_path},{dataset_type},{track_id},{duration_seconds}"
             linhas.append(linha)
     
     conteudo = "\n".join(linhas)
